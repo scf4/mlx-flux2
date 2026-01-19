@@ -238,7 +238,9 @@ def denoise(
         )
         if img_cond_seq is not None:
             pred = pred[:, : img.shape[1]]
-        img = img + (t_prev - t_curr) * pred
+        # Pre-cast dt to model dtype to avoid potential float64 promotion
+        dt = mx.array(t_prev - t_curr, dtype=img.dtype)
+        img = img + dt * pred
         if eval_freq <= 1 or (step + 1) % eval_freq == 0 or step == num_steps - 1:
             mx.eval(img)
         step_time = time.perf_counter() - step_start
@@ -301,6 +303,8 @@ def denoise_cfg(
         call_fn = model_fn
         use_cfg_wrapper = False
 
+    # Pre-cast guidance to model dtype to avoid potential float64 promotion
+    guidance_arr = mx.array(guidance, dtype=img.dtype)
     num_steps = len(timesteps) - 1
     for step, (t_curr, t_prev) in enumerate(zip(timesteps[:-1], timesteps[1:])):
         step_start = time.perf_counter()
@@ -338,9 +342,11 @@ def denoise_cfg(
         if img_cond_seq is not None:
             pred = pred[:, : img.shape[1]]
         pred_uncond, pred_cond = mx.split(pred, 2, axis=0)
-        pred = pred_uncond + guidance * (pred_cond - pred_uncond)
+        pred = pred_uncond + guidance_arr * (pred_cond - pred_uncond)
         pred = mx.concatenate([pred, pred], axis=0)
-        img = img + (t_prev - t_curr) * pred
+        # Pre-cast dt to model dtype to avoid potential float64 promotion
+        dt = mx.array(t_prev - t_curr, dtype=img.dtype)
+        img = img + dt * pred
         if eval_freq <= 1 or (step + 1) % eval_freq == 0 or step == num_steps - 1:
             mx.eval(img)
         step_time = time.perf_counter() - step_start
