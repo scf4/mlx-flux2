@@ -65,17 +65,18 @@ class Qwen3Tokenizer:
     def encode_batch(
         self, prompts: Iterable[str], max_length: int, pad_to_max: bool = False
     ) -> Tuple[mx.array, mx.array]:
+        prompts = list(prompts)
+        if not prompts:
+            raise ValueError("encode_batch() requires at least one prompt")
+        texts = [self.apply_chat_template(p, add_generation_prompt=True) for p in prompts]
+        encs = self.tokenizer.encode_batch(texts)
+
         input_ids: List[List[int]] = []
         attention_masks: List[List[int]] = []
-        for prompt in prompts:
-            text = self.apply_chat_template(prompt, add_generation_prompt=True)
-            enc = self.tokenizer.encode(text)
-            ids = enc.ids
-            if len(ids) > max_length:
-                ids = ids[:max_length]
-            mask = [1] * len(ids)
+        for enc in encs:
+            ids = enc.ids[:max_length]
             input_ids.append(ids)
-            attention_masks.append(mask)
+            attention_masks.append([1] * len(ids))
 
         actual_max = max(len(ids) for ids in input_ids)
         if pad_to_max:
