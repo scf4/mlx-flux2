@@ -73,14 +73,25 @@ def compute_rope_frequencies(dim: int, theta: float) -> mx.array:
     return 1.0 / (theta ** scale)
 
 
-def rope(pos: mx.array, dim: int, theta: float, omega: mx.array | None = None) -> mx.array:
+def rope(
+    pos: mx.array,
+    dim: int,
+    theta: float,
+    omega: mx.array | None = None,
+    dtype: mx.Dtype | None = None,
+) -> mx.array:
     if omega is None:
         omega = compute_rope_frequencies(dim, theta)
+    # Compute in float32 for numerical stability
     out = pos.astype(mx.float32)[..., None] * omega
     cos_out = mx.cos(out)
     sin_out = mx.sin(out)
     stacked = mx.stack([cos_out, -sin_out, sin_out, cos_out], axis=-1)
-    return stacked.reshape((*stacked.shape[:-1], 2, 2))
+    result = stacked.reshape((*stacked.shape[:-1], 2, 2))
+    # Cast to target dtype if specified (keeps attention in model dtype)
+    if dtype is not None and dtype != mx.float32:
+        result = result.astype(dtype)
+    return result
 
 
 def apply_rope(xq: mx.array, xk: mx.array, freqs_cis: mx.array) -> Tuple[mx.array, mx.array]:
@@ -121,10 +132,12 @@ class EmbedND(nn.Module):
         self.theta = theta
         self.axes_dim = axes_dim
         self._omega_cache = [compute_rope_frequencies(d, theta) for d in axes_dim]
+        self._output_dtype: mx.Dtype | None = None  # Set by pipeline for dtype matching
 
     def __call__(self, ids: mx.array) -> mx.array:
+        dtype = self._output_dtype
         parts = [
-            rope(ids[..., i], self.axes_dim[i], self.theta, self._omega_cache[i])
+            rope(ids[..., i], self.axes_dim[i], self.theta, self._omega_cache[i], dtype=dtype)
             for i in range(len(self.axes_dim))
         ]
         emb = mx.concatenate(parts, axis=-3)

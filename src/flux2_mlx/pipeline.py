@@ -84,6 +84,8 @@ class Flux2Pipeline:
         self.text_encoder = Qwen3Embedder(qwen_cfg, tokenizer, safe_attn=self.safe_attn)
 
         self.model.set_dtype(self.dtype)
+        # Set PE dtype to match model dtype (unless safe_attn keeps attention in fp32)
+        self.model.pe_embedder._output_dtype = None if self.safe_attn else self.dtype
         self.text_encoder.model.set_dtype(self.dtype)
         if self.vae_fp16:
             self.vae.force_upcast = False
