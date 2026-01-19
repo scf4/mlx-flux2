@@ -1,13 +1,7 @@
 from __future__ import annotations
 
 import argparse
-import sys
 from pathlib import Path
-
-# Allow running directly: python generate.py
-if __name__ == "__main__" and __package__ is None:
-    sys.path.insert(0, str(Path(__file__).parent.parent))
-    __package__ = "flux2_mlx"
 
 from .defaults import (
     DEFAULT_REPO_ID,
@@ -31,7 +25,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def _add_generate_args(parser: argparse.ArgumentParser) -> None:
     """Add generation arguments to a parser."""
-    parser.add_argument("--prompt", type=str, help="Text prompt")
+    parser.add_argument("--prompt", type=str, required=True, help="Text prompt")
     parser.add_argument("--width", type=int, default=DEFAULT_WIDTH)
     parser.add_argument("--height", type=int, default=DEFAULT_HEIGHT)
     parser.add_argument("--steps", type=int, default=DEFAULT_STEPS)
@@ -52,10 +46,6 @@ def _add_generate_args(parser: argparse.ArgumentParser) -> None:
 
 def run_generate(args: argparse.Namespace) -> None:
     """Run image generation."""
-    if not args.prompt:
-        print("Error: --prompt is required for generation")
-        return
-
     quant = None if args.quantize == "none" else args.quantize
     pipe = Flux2Pipeline(
         repo_id=args.repo_id,
@@ -89,12 +79,12 @@ def run_generate(args: argparse.Namespace) -> None:
 def main():
     parser = build_parser()
     args = parser.parse_args()
-
-    if args.prompt:
-        run_generate(args)
-    else:
-        parser.print_help()
+    run_generate(args)
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(
+        "Direct script execution is not supported.\n"
+        "Use: flux2-mlx --prompt '...'  (after pip install)\n"
+        "  or: python -m flux2_mlx --prompt '...'"
+    )
