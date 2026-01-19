@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 import json
 from pathlib import Path
 from typing import Iterable
@@ -10,7 +9,14 @@ import mlx.nn as nn
 from PIL import Image
 
 from .config import load_flux2_config, load_qwen3_config, load_vae_config
-from .defaults import DEFAULT_REPO_ID, WEIGHT_FILES
+from .defaults import (
+    DEFAULT_GUIDANCE,
+    DEFAULT_HEIGHT,
+    DEFAULT_REPO_ID,
+    DEFAULT_STEPS,
+    DEFAULT_WIDTH,
+    WEIGHT_FILES,
+)
 from .image import array_to_pil
 from .model import Flux2
 from .sampling import (
@@ -27,21 +33,11 @@ from .tokenizer import Qwen3Tokenizer
 from .utils import (
     align_and_load,
     align_and_load_from_torch,
-    find_snapshot,
     list_safetensors,
     resolve_repo_path,
 )
 from .vae import AutoEncoder
 from .weight_converter import convert_flux2_diffusers_weights, convert_vae_diffusers_weights
-
-
-@dataclass
-class GenerationConfig:
-    width: int = 1024
-    height: int = 1024
-    num_steps: int = 4
-    guidance: float = 1.0
-    seed: int | None = None
 
 
 class Flux2Pipeline:
@@ -57,23 +53,12 @@ class Flux2Pipeline:
     ):
         self.repo_id = repo_id
         self.repo_path = resolve_repo_path(repo_id, repo_path)
-        if repo_path is None:
-            snapshot = find_snapshot(repo_id)
-            self.weights_path = snapshot if snapshot is not None else self.repo_path
-        else:
-            self.weights_path = self.repo_path
+        self.weights_path = self.repo_path
         self.safe_attn = safe_attn
         self.vae_fp16 = vae_fp16
         self.compile = compile
 
-        if repo_path is not None:
-            self.tokenizer_path = self.repo_path
-        else:
-            local_repo = Path.cwd() / repo_id.split("/")[-1]
-            if (local_repo / "tokenizer" / "tokenizer.json").exists():
-                self.tokenizer_path = local_repo
-            else:
-                self.tokenizer_path = self.weights_path
+        self.tokenizer_path = self.repo_path
         self.dtype = getattr(mx, dtype)
         self.quantize_mode = quantize
 
@@ -138,12 +123,14 @@ class Flux2Pipeline:
 
         if not shard_paths:
             base_repo_id = "black-forest-labs/FLUX.2-klein-4B"
-            base_snapshot = find_snapshot(base_repo_id)
-            if base_snapshot:
+            try:
+                base_snapshot = resolve_repo_path(base_repo_id, None)
                 te_dir = base_snapshot / "text_encoder"
                 shard_paths = list_safetensors(te_dir)
                 if not shard_paths:
                     shard_paths = list((te_dir).glob("model-*.safetensors"))
+            except FileNotFoundError:
+                pass
 
         if not shard_paths:
             raise FileNotFoundError(
@@ -164,10 +151,23 @@ class Flux2Pipeline:
         self.model_forward = self.model
         self.vae_decode = self.vae.decode
         self._te_model_forward = self.text_encoder.model.__call__
+
+        # Create CFG wrapper that always passes guidance=None
+        def _cfg_forward(x, x_ids, t, ctx, ctx_ids, pe_x, pe_ctx, txt_embedded):
+            return self.model(
+                x, x_ids, t, ctx, ctx_ids,
+                guidance=None,
+                pe_x=pe_x, pe_ctx=pe_ctx,
+                txt_embedded=txt_embedded,
+                guidance_embedded=None,
+            )
+        self.model_forward_cfg = _cfg_forward
+
         if self.compile:
             self.model_forward = mx.compile(self.model.__call__)
             self.vae_decode = mx.compile(self.vae.decode)
             self._te_model_forward = mx.compile(self.text_encoder.model.__call__)
+            self.model_forward_cfg = mx.compile(_cfg_forward)
 
         self._cached_empty_ctx = None
 
@@ -176,30 +176,28 @@ class Flux2Pipeline:
         input_ids, attention_mask = self.text_encoder.tokenize(prompts)
         return self._te_model_forward(input_ids, attention_mask)
 
-    def _get_empty_ctx(self) -> mx.array:
-        """Get cached empty prompt embedding for CFG."""
-        if self._cached_empty_ctx is None:
-            self._cached_empty_ctx = self._encode_text([""])
-            mx.eval(self._cached_empty_ctx)
-        return self._cached_empty_ctx
-
     def encode_prompt(self, prompt: str, guidance_distilled: bool) -> tuple[mx.array, mx.array]:
         if guidance_distilled:
             ctx = self._encode_text([prompt])
         else:
-            ctx_empty = self._get_empty_ctx()
-            ctx_prompt = self._encode_text([prompt])
-            ctx = mx.concatenate([ctx_empty, ctx_prompt], axis=0)
+            if self._cached_empty_ctx is None:
+                both = self._encode_text(["", prompt])
+                mx.eval(both)
+                self._cached_empty_ctx = both[:1]
+                ctx_prompt = both[1:]
+            else:
+                ctx_prompt = self._encode_text([prompt])
+            ctx = mx.concatenate([self._cached_empty_ctx, ctx_prompt], axis=0)
         ctx, ctx_ids = batched_prc_txt(ctx)
         return ctx, ctx_ids
 
     def generate(
         self,
         prompt: str,
-        width: int = 1024,
-        height: int = 1024,
-        num_steps: int = 4,
-        guidance: float = 1.0,
+        width: int = DEFAULT_WIDTH,
+        height: int = DEFAULT_HEIGHT,
+        num_steps: int = DEFAULT_STEPS,
+        guidance: float = DEFAULT_GUIDANCE,
         seed: int | None = None,
         input_images: Iterable[Image.Image] | None = None,
         guidance_distilled: bool | None = None,
@@ -240,7 +238,9 @@ class Flux2Pipeline:
                 print(f"[{timings['ref_encode']*1000:7.1f}ms] Ref encode: {img_cond_seq.shape[1]} tokens")
 
         t0 = time.perf_counter()
-        shape = (1, 128, height // 16, width // 16)
+        batch_size = 1  # future: support multiple prompts
+        latent_channels = self.model.in_channels
+        shape = (batch_size, latent_channels, height // 16, width // 16)
         noise = mx.random.normal(shape=shape, dtype=self.dtype)
         x, x_ids = batched_prc_img(noise)
         if verbose:
@@ -308,6 +308,7 @@ class Flux2Pipeline:
                 pe_x=pe_x,
                 pe_ctx=pe_ctx,
                 model_fn=self.model_forward,
+                model_fn_cfg=self.model_forward_cfg,
                 step_times=step_times if verbose else None,
                 eval_freq=eval_freq,
             )
@@ -348,7 +349,5 @@ class Flux2Pipeline:
         if verbose:
             print(f"[{timings['to_pil']*1000:7.1f}ms] To PIL")
             print(f"[{total_time*1000:7.1f}ms] TOTAL")
-        else:
-            print(f"Generated in {total_time*1000:.0f}ms")
 
         return result
