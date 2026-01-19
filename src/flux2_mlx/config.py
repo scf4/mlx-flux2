@@ -14,7 +14,7 @@ class Flux2Config:
     depth: int
     depth_single_blocks: int
     axes_dim: list[int]
-    theta: int
+    theta: float
     mlp_ratio: float
     use_guidance_embed: bool
 
@@ -62,7 +62,7 @@ def load_flux2_config(path: Path) -> Flux2Config:
         depth=int(data["num_layers"]),
         depth_single_blocks=int(data["num_single_layers"]),
         axes_dim=list(data["axes_dims_rope"]),
-        theta=int(data["rope_theta"]),
+        theta=float(data["rope_theta"]),
         mlp_ratio=float(data["mlp_ratio"]),
         use_guidance_embed=bool(data.get("guidance_embeds", False)),
     )

@@ -65,7 +65,7 @@ def timestep_embedding(t: mx.array, dim: int, max_period: int = 10000, time_fact
     return emb.astype(t.dtype)
 
 
-def compute_rope_frequencies(dim: int, theta: int) -> mx.array:
+def compute_rope_frequencies(dim: int, theta: float) -> mx.array:
     """Precompute RoPE frequency basis (cached per dim/theta pair)."""
     if dim % 2 != 0:
         raise ValueError("RoPE dim must be even")
@@ -73,7 +73,7 @@ def compute_rope_frequencies(dim: int, theta: int) -> mx.array:
     return 1.0 / (theta ** scale)
 
 
-def rope(pos: mx.array, dim: int, theta: int, omega: mx.array | None = None) -> mx.array:
+def rope(pos: mx.array, dim: int, theta: float, omega: mx.array | None = None) -> mx.array:
     if omega is None:
         omega = compute_rope_frequencies(dim, theta)
     out = pos.astype(mx.float32)[..., None] * omega
@@ -115,7 +115,7 @@ def attention(
 
 
 class EmbedND(nn.Module):
-    def __init__(self, dim: int, theta: int, axes_dim: list[int]):
+    def __init__(self, dim: int, theta: float, axes_dim: list[int]):
         super().__init__()
         self.dim = dim
         self.theta = theta
