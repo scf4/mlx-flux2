@@ -140,17 +140,33 @@ def scatter_ids(x: mx.array, x_ids: mx.array) -> List[mx.array]:
         t_ids = pos[:, 0].astype(mx.int32)
         h_ids = pos[:, 1].astype(mx.int32)
         w_ids = pos[:, 2].astype(mx.int32)
-        t_ids_cmpr = compress_time(t_ids)
-        t = int(mx.max(t_ids_cmpr).item()) + 1
-        h = int(mx.max(h_ids).item()) + 1
-        w = int(mx.max(w_ids).item()) + 1
-        flat_ids = t_ids_cmpr * (h * w) + h_ids * w + w_ids
+
+        # Query dimension bounds - .item() forces sync
+        t_min = mx.min(t_ids)
+        t_max = mx.max(t_ids)
+        h_max = mx.max(h_ids)
+        w_max = mx.max(w_ids)
+        t_min_val = int(t_min.item())
+        t_max_val = int(t_max.item())
+        h = int(h_max.item()) + 1
+        w = int(w_max.item()) + 1
         c = data.shape[1]
-        out = mx.zeros((t * h * w, c), dtype=data.dtype)
-        indices = mx.broadcast_to(flat_ids[:, None], (flat_ids.shape[0], c))
-        out = mx.put_along_axis(out, indices, data, axis=0)
-        out = out.reshape(t, h, w, c).transpose(3, 0, 1, 2)
-        out_list.append(mx.expand_dims(out, axis=0))
+
+        if t_min_val == t_max_val:
+            # Fast path: single time step, tokens are already in raster order
+            # from prc_img(), so we can reshape directly without scatter
+            out = data.reshape(1, h, w, c).transpose(3, 0, 1, 2)
+            out_list.append(mx.expand_dims(out, axis=0))
+        else:
+            # Slow path: multiple time steps (reference images)
+            t_ids_cmpr = compress_time(t_ids)
+            t = int(mx.max(t_ids_cmpr).item()) + 1
+            flat_ids = t_ids_cmpr * (h * w) + h_ids * w + w_ids
+            out = mx.zeros((t * h * w, c), dtype=data.dtype)
+            indices = mx.broadcast_to(flat_ids[:, None], (flat_ids.shape[0], c))
+            out = mx.put_along_axis(out, indices, data, axis=0)
+            out = out.reshape(t, h, w, c).transpose(3, 0, 1, 2)
+            out_list.append(mx.expand_dims(out, axis=0))
     return out_list
 
 
