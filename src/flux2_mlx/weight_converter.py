@@ -4,7 +4,15 @@ from typing import Dict
 
 import mlx.core as mx
 
-from .config import Flux2Config
+from .config import Flux2Config, VAEConfig
+
+
+def _require_keys(weights: Dict[str, mx.array], keys: list[str], context: str) -> None:
+    """Validate that required keys exist in weights dict."""
+    missing = [k for k in keys if k not in weights]
+    if missing:
+        examples = missing[:5]
+        raise KeyError(f"{context}: missing {len(missing)} key(s), e.g. {examples}")
 
 
 def convert_flux2_diffusers_weights(weights: Dict[str, mx.array], cfg: Flux2Config) -> Dict[str, mx.array]:
@@ -27,6 +35,17 @@ def convert_flux2_diffusers_weights(weights: Dict[str, mx.array], cfg: Flux2Conf
 
     for i in range(cfg.depth):
         base = f"transformer_blocks.{i}.attn"
+        required_keys = [
+            f"{base}.to_q.weight", f"{base}.to_k.weight", f"{base}.to_v.weight",
+            f"{base}.add_q_proj.weight", f"{base}.add_k_proj.weight", f"{base}.add_v_proj.weight",
+            f"{base}.to_out.0.weight", f"{base}.to_add_out.weight",
+            f"{base}.norm_q.weight", f"{base}.norm_k.weight",
+            f"{base}.norm_added_q.weight", f"{base}.norm_added_k.weight",
+            f"transformer_blocks.{i}.ff.linear_in.weight", f"transformer_blocks.{i}.ff.linear_out.weight",
+            f"transformer_blocks.{i}.ff_context.linear_in.weight", f"transformer_blocks.{i}.ff_context.linear_out.weight",
+        ]
+        _require_keys(weights, required_keys, f"double_blocks.{i}")
+
         q = weights[f"{base}.to_q.weight"]
         k = weights[f"{base}.to_k.weight"]
         v = weights[f"{base}.to_v.weight"]
@@ -51,6 +70,12 @@ def convert_flux2_diffusers_weights(weights: Dict[str, mx.array], cfg: Flux2Conf
 
     for i in range(cfg.depth_single_blocks):
         base = f"single_transformer_blocks.{i}.attn"
+        required_keys = [
+            f"{base}.to_qkv_mlp_proj.weight", f"{base}.to_out.weight",
+            f"{base}.norm_q.weight", f"{base}.norm_k.weight",
+        ]
+        _require_keys(weights, required_keys, f"single_blocks.{i}")
+
         out[f"single_blocks.{i}.linear1.weight"] = weights[f"{base}.to_qkv_mlp_proj.weight"]
         out[f"single_blocks.{i}.linear2.weight"] = weights[f"{base}.to_out.weight"]
         out[f"single_blocks.{i}.norm.query_norm.scale"] = weights[f"{base}.norm_q.weight"]
@@ -59,7 +84,18 @@ def convert_flux2_diffusers_weights(weights: Dict[str, mx.array], cfg: Flux2Conf
     return out
 
 
-def convert_vae_diffusers_weights(weights: Dict[str, mx.array]) -> Dict[str, mx.array]:
+def convert_vae_diffusers_weights(weights: Dict[str, mx.array], cfg: VAEConfig | None = None) -> Dict[str, mx.array]:
+    """Convert VAE weights from diffusers format.
+
+    Args:
+        weights: Raw weights dict from diffusers checkpoint
+        cfg: VAE config (optional, defaults to 4 blocks with 2 resnets each)
+    """
+    # Use config if provided, otherwise fall back to typical FLUX VAE structure
+    num_blocks = len(cfg.ch_mult) if cfg else 4
+    num_resnets_down = cfg.num_res_blocks if cfg else 2
+    num_resnets_up = (cfg.num_res_blocks + 1) if cfg else 3
+
     out: Dict[str, mx.array] = {}
 
     def rename(src: str, dst: str):
@@ -88,8 +124,8 @@ def convert_vae_diffusers_weights(weights: Dict[str, mx.array]) -> Dict[str, mx.
     rename("post_quant_conv.weight", "decoder.post_quant_conv.weight")
     rename("post_quant_conv.bias", "decoder.post_quant_conv.bias")
 
-    for i in range(4):
-        for j in range(2):
+    for i in range(num_blocks):
+        for j in range(num_resnets_down):
             prefix = f"encoder.down_blocks.{i}.resnets.{j}"
             dst = f"encoder.down.{i}.block.{j}"
             rename(f"{prefix}.conv1.weight", f"{dst}.conv1.weight")
@@ -102,7 +138,7 @@ def convert_vae_diffusers_weights(weights: Dict[str, mx.array]) -> Dict[str, mx.
             rename(f"{prefix}.norm2.bias", f"{dst}.norm2.bias")
             rename(f"{prefix}.conv_shortcut.weight", f"{dst}.nin_shortcut.weight")
             rename(f"{prefix}.conv_shortcut.bias", f"{dst}.nin_shortcut.bias")
-        if i != 3:
+        if i != num_blocks - 1:
             rename(
                 f"encoder.down_blocks.{i}.downsamplers.0.conv.weight",
                 f"encoder.down.{i}.downsample.conv.weight",
@@ -139,10 +175,9 @@ def convert_vae_diffusers_weights(weights: Dict[str, mx.array]) -> Dict[str, mx.
     rename(f"{attn}.to_out.0.weight", f"{dst}.proj_out.weight")
     rename(f"{attn}.to_out.0.bias", f"{dst}.proj_out.bias")
 
-    num_res = 4
-    for i in range(num_res):
-        dst_i = num_res - 1 - i
-        for j in range(3):
+    for i in range(num_blocks):
+        dst_i = num_blocks - 1 - i
+        for j in range(num_resnets_up):
             src = f"decoder.up_blocks.{i}.resnets.{j}"
             dst = f"decoder.up.{dst_i}.block.{j}"
             rename(f"{src}.conv1.weight", f"{dst}.conv1.weight")
@@ -155,7 +190,7 @@ def convert_vae_diffusers_weights(weights: Dict[str, mx.array]) -> Dict[str, mx.
             rename(f"{src}.norm2.bias", f"{dst}.norm2.bias")
             rename(f"{src}.conv_shortcut.weight", f"{dst}.nin_shortcut.weight")
             rename(f"{src}.conv_shortcut.bias", f"{dst}.nin_shortcut.bias")
-        if i != num_res - 1:
+        if i != num_blocks - 1:
             rename(
                 f"decoder.up_blocks.{i}.upsamplers.0.conv.weight",
                 f"decoder.up.{dst_i}.upsample.conv.weight",
