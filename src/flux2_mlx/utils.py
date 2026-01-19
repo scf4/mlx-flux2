@@ -4,39 +4,29 @@ from pathlib import Path
 from typing import Dict, Iterable, Tuple
 
 import mlx.core as mx
+from huggingface_hub import snapshot_download
 from mlx.utils import tree_flatten
 
 
-def find_snapshot(repo_id: str) -> Path | None:
-    repo_dir = repo_id.replace("/", "--")
-    base = Path.home() / ".cache" / "huggingface" / "hub" / f"models--{repo_dir}" / "snapshots"
-    if not base.exists():
-        return None
-    snapshots = list(base.glob("*"))
-    if not snapshots:
-        return None
-    snapshots.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-    return snapshots[0]
-
-
-def resolve_repo_path(repo_id: str, local_path: Path | None = None) -> Path:
-    if local_path is not None and local_path.exists():
+def resolve_repo_path(repo_id: str, local_path: Path | None = None, revision: str | None = None) -> Path:
+    if local_path is not None:
+        if not local_path.exists():
+            raise FileNotFoundError(f"Local repo path does not exist: {local_path}")
         return local_path
     cwd_candidate = Path.cwd() / repo_id.split("/")[-1]
     if cwd_candidate.exists():
         return cwd_candidate
-    snapshot = find_snapshot(repo_id)
-    if snapshot is None:
-        raise FileNotFoundError(
-            f"Could not find local repo or HF cache for {repo_id}."
-        )
-    return snapshot
+    return Path(snapshot_download(repo_id, revision=revision, local_files_only=True))
 
 
 def load_safetensors(paths: Iterable[Path]) -> Dict[str, mx.array]:
     weights: Dict[str, mx.array] = {}
     for path in paths:
         w = mx.load(str(path))
+        dupes = set(weights).intersection(w)
+        if dupes:
+            examples = sorted(list(dupes))[:5]
+            raise ValueError(f"Duplicate weight keys in {path.name}: {examples}...")
         weights.update(w)
     return weights
 
