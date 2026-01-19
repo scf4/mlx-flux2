@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# macOS
+.DS_Store
+._*
+
+# Model weights (download separately)
+*.safetensors
+*.bin
+*.pt
+*.ckpt
+
+# HuggingFace cache
+.cache/
+
+# Local config overrides
+*.local.py
