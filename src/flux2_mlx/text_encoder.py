@@ -11,7 +11,11 @@ from .defaults import TEXT_ENCODER_MAX_LENGTH, TEXT_ENCODER_OUTPUT_LAYERS
 from .tokenizer import Qwen3Tokenizer
 
 OUTPUT_LAYERS_QWEN3 = TEXT_ENCODER_OUTPUT_LAYERS
+_OUTPUT_LAYERS_SET = frozenset(OUTPUT_LAYERS_QWEN3)
 _MAX_OUTPUT_LAYER = max(OUTPUT_LAYERS_QWEN3)
+
+# Cache for causal mask triangles by sequence length
+_CAUSAL_MASK_CACHE: dict[int, mx.array] = {}
 
 
 class Qwen3Attention(nn.Module):
@@ -107,11 +111,10 @@ class Qwen3Backbone(nn.Module):
         mask = None
         if attention_mask is not None:
             mask = build_causal_padding_mask(attention_mask, dtype=h.dtype)
-        output_layers_set = set(OUTPUT_LAYERS_QWEN3)
         selected_states: List[mx.array] = []
         for i, layer in enumerate(self.layers):
             h = layer(h, mask)
-            if (i + 1) in output_layers_set:
+            if (i + 1) in _OUTPUT_LAYERS_SET:
                 selected_states.append(h)
             if (i + 1) >= _MAX_OUTPUT_LAYER:
                 break
@@ -148,8 +151,11 @@ class Qwen3Embedder:
 
 def build_causal_padding_mask(attention_mask: mx.array, dtype: mx.Dtype = mx.float32) -> mx.array:
     b, l = attention_mask.shape
-    idx = mx.arange(l)
-    causal = idx[:, None] < idx[None, :]
+    # Cache the causal triangle by sequence length
+    if l not in _CAUSAL_MASK_CACHE:
+        idx = mx.arange(l)
+        _CAUSAL_MASK_CACHE[l] = idx[:, None] < idx[None, :]
+    causal = _CAUSAL_MASK_CACHE[l]
     key_mask = attention_mask.astype(mx.bool_)
     invalid = causal[None, :, :] | (~key_mask[:, None, :])
     mask = invalid.astype(dtype) * mx.finfo(dtype).min
