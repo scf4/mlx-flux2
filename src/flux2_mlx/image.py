@@ -6,7 +6,7 @@ from typing import Iterable, List
 
 import mlx.core as mx
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageOps
 
 
 def to_rgb(img: Image.Image | List[Image.Image]):
@@ -56,6 +56,7 @@ def array_to_pil(arr: mx.array) -> Image.Image:
 
 
 def default_prep(img: Image.Image, limit_pixels: int | None, ensure_multiple: int = 16) -> mx.array:
+    img = ImageOps.exif_transpose(img)
     img = to_rgb(img)
     img = cap_min_pixels(img)
     if limit_pixels is not None:
@@ -65,4 +66,8 @@ def default_prep(img: Image.Image, limit_pixels: int | None, ensure_multiple: in
 
 
 def load_images(paths: Iterable[Path]) -> List[Image.Image]:
-    return [Image.open(p) for p in paths]
+    images: List[Image.Image] = []
+    for p in paths:
+        with Image.open(p) as im:
+            images.append(im.convert("RGB").copy())
+    return images
