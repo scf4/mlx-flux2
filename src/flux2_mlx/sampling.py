@@ -9,6 +9,11 @@ from PIL import Image
 
 from .model import Flux2
 from .image import default_prep
+from .defaults import (
+    REF_IMAGE_LIMIT_PIXELS_SINGLE,
+    REF_IMAGE_LIMIT_PIXELS_MULTI,
+    REF_TIME_OFFSET_SCALE,
+)
 
 
 def generalized_time_snr_shift(t: mx.array, mu: float, sigma: float) -> mx.array:
@@ -90,23 +95,37 @@ def listed_prc_img(x_list: List[mx.array], t_coord: List[mx.array] | None = None
     return toks, ids
 
 
-def encode_image_refs(ae, img_ctx: List[Image.Image]):
-    scale = 10
-    if len(img_ctx) > 1:
-        limit_pixels = 1024**2
-    elif len(img_ctx) == 1:
-        limit_pixels = 2024**2
-    else:
-        limit_pixels = None
+def encode_image_refs(
+    ae,
+    img_ctx: List[Image.Image],
+    *,
+    time_offset_scale: int = REF_TIME_OFFSET_SCALE,
+    limit_pixels_single: int = REF_IMAGE_LIMIT_PIXELS_SINGLE,
+    limit_pixels_multi: int = REF_IMAGE_LIMIT_PIXELS_MULTI,
+):
+    """Encode reference images for conditioning.
+
+    Args:
+        ae: VAE encoder
+        img_ctx: List of reference images
+        time_offset_scale: Multiplier for time offsets (default: 10)
+        limit_pixels_single: Max pixels for single image (default: 2048^2)
+        limit_pixels_multi: Max pixels per image when multiple (default: 1024^2)
+    """
     if not img_ctx:
         return None, None
+    if len(img_ctx) > 1:
+        limit_pixels = limit_pixels_multi
+    else:
+        limit_pixels = limit_pixels_single
     img_ctx_prep = [default_prep(img, limit_pixels=limit_pixels) for img in img_ctx]
     encoded_refs = []
     for img in img_ctx_prep:
         latent = ae.encode(mx.expand_dims(img, axis=0))
         latent = latent.transpose(0, 3, 1, 2)[0]
         encoded_refs.append(latent)
-    t_off = [mx.array([scale * (1 + i)], dtype=mx.int32) for i in range(len(encoded_refs))]
+    # Use compact time IDs (1, 2, 3, ...) to avoid host-side compression in compress_time()
+    t_off = [mx.array([1 + i], dtype=mx.int32) for i in range(len(encoded_refs))]
     ref_tokens, ref_ids = listed_prc_img(encoded_refs, t_coord=t_off)
     ref_tokens = mx.concatenate(ref_tokens, axis=0)
     ref_ids = mx.concatenate(ref_ids, axis=0)
@@ -228,6 +247,7 @@ def denoise_cfg(
     pe_x: mx.array | None = None,
     pe_ctx: mx.array | None = None,
     model_fn=None,
+    model_fn_cfg=None,
     step_times: List[float] | None = None,
     txt_embedded: mx.array | None = None,
     eval_freq: int = 1,
@@ -251,6 +271,20 @@ def denoise_cfg(
     if txt_embedded is None:
         txt_embedded = model.embed_txt(txt)
 
+    # Determine which forward function to use for CFG
+    if model_fn_cfg is not None:
+        # Use the dedicated CFG forward (compiled or not)
+        call_fn = model_fn_cfg
+        use_cfg_wrapper = True
+    elif model.use_guidance_embed:
+        # Fallback: use uncompiled model when guidance embed is enabled
+        call_fn = model
+        use_cfg_wrapper = False
+    else:
+        # No guidance embed, use standard model_fn
+        call_fn = model_fn
+        use_cfg_wrapper = False
+
     num_steps = len(timesteps) - 1
     for step, (t_curr, t_prev) in enumerate(zip(timesteps[:-1], timesteps[1:])):
         step_start = time.perf_counter()
@@ -258,24 +292,33 @@ def denoise_cfg(
         img_input = img
         if img_cond_seq is not None:
             img_input = mx.concatenate([img_input, img_cond_seq], axis=1)
-        call_fn = model_fn
-        guidance_arg = None
-        if model.use_guidance_embed:
-            call_fn = model
+
+        if use_cfg_wrapper:
+            # CFG wrapper takes fewer args (guidance is always None)
+            pred = call_fn(
+                img_input,
+                img_input_ids,
+                t_vec,
+                txt,
+                txt_ids,
+                pe_x,
+                pe_ctx,
+                txt_embedded,
+            )
         else:
-            guidance_arg = mx.zeros((img.shape[0],), dtype=img.dtype)
-        pred = call_fn(
-            img_input,
-            img_input_ids,
-            t_vec,
-            txt,
-            txt_ids,
-            guidance_arg,
-            pe_x,
-            pe_ctx,
-            txt_embedded,
-            None,
-        )
+            guidance_arg = None if model.use_guidance_embed else mx.zeros((img.shape[0],), dtype=img.dtype)
+            pred = call_fn(
+                img_input,
+                img_input_ids,
+                t_vec,
+                txt,
+                txt_ids,
+                guidance_arg,
+                pe_x,
+                pe_ctx,
+                txt_embedded,
+                None,
+            )
         if img_cond_seq is not None:
             pred = pred[:, : img.shape[1]]
         pred_uncond, pred_cond = mx.split(pred, 2, axis=0)
