@@ -17,6 +17,7 @@ _MAX_OUTPUT_LAYER = max(OUTPUT_LAYERS_QWEN3)
 class Qwen3Attention(nn.Module):
     def __init__(self, cfg: Qwen3Config, safe_attn: bool = False):
         super().__init__()
+        self.safe_attn = safe_attn
         self.n_heads = cfg.num_attention_heads
         self.n_kv_heads = cfg.num_key_value_heads
         self.head_dim = cfg.head_dim
@@ -35,6 +36,7 @@ class Qwen3Attention(nn.Module):
 
     def __call__(self, x: mx.array, mask: mx.array | None) -> mx.array:
         b, l, _ = x.shape
+        orig_dtype = x.dtype
 
         q = self.q_proj(x).reshape(b, l, self.n_heads, self.head_dim)
         k = self.k_proj(x).reshape(b, l, self.n_kv_heads, self.head_dim)
@@ -51,10 +53,18 @@ class Qwen3Attention(nn.Module):
             k = mx.repeat(k, self.n_rep, axis=1)
             v = mx.repeat(v, self.n_rep, axis=1)
 
-        if mask is not None and mask.dtype != q.dtype:
-            mask = mask.astype(q.dtype)
+        if self.safe_attn:
+            qf = q.astype(mx.float32)
+            kf = k.astype(mx.float32)
+            vf = v.astype(mx.float32)
+            mf = None if mask is None else mask.astype(mx.float32)
+            out = mx.fast.scaled_dot_product_attention(qf, kf, vf, scale=self.scale, mask=mf)
+            out = out.astype(orig_dtype)
+        else:
+            if mask is not None and mask.dtype != q.dtype:
+                mask = mask.astype(q.dtype)
+            out = mx.fast.scaled_dot_product_attention(q, k, v, scale=self.scale, mask=mask)
 
-        out = mx.fast.scaled_dot_product_attention(q, k, v, scale=self.scale, mask=mask)
         out = out.transpose(0, 2, 1, 3).reshape(b, l, -1)
         return self.o_proj(out)
 
