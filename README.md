@@ -9,8 +9,8 @@ Implementation of FLUX.2 image generation using Apple's MLX framework.
 ## Quick Start
 
 ```bash
-pip install -r requirements.txt
-python generate.py --prompt "A photo of a cute avocado robot playing with paperclips in a black forest"
+pip install -e .
+flux2-mlx --prompt "A photo of a cute avocado robot playing with paperclips in a black forest"
 ```
 
 ## Options
