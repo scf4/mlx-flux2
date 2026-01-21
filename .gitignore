@@ -36,3 +36,6 @@ env/
 
 # Local config overrides
 *.local.py
+
+# Dev docs/research notes
+.docs/
