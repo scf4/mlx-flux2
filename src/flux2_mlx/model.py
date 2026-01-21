@@ -19,6 +19,18 @@ class RMSNorm(nn.Module):
         return mx.fast.rms_norm(x, self.scale, self.eps)
 
 
+class FastLayerNorm(nn.Module):
+    """LayerNorm without learnable parameters using mx.fast.layer_norm."""
+    def __init__(self, dim: int, eps: float = 1e-6):
+        super().__init__()
+        self.eps = eps
+        self._weight = None
+        self._bias = None
+
+    def __call__(self, x: mx.array) -> mx.array:
+        return mx.fast.layer_norm(x, weight=self._weight, bias=self._bias, eps=self.eps)
+
+
 class QKNorm(nn.Module):
     def __init__(self, dim: int, eps: float = 1e-6):
         super().__init__()
@@ -196,7 +208,7 @@ class SingleStreamBlock(nn.Module):
         self.linear1 = nn.Linear(hidden_size, hidden_size * 3 + self.mlp_hidden_dim * self.mlp_mult_factor, bias=False)
         self.linear2 = nn.Linear(hidden_size + self.mlp_hidden_dim, hidden_size, bias=False)
         self.norm = QKNorm(head_dim)
-        self.pre_norm = nn.LayerNorm(hidden_size, eps=1e-6, affine=False)
+        self.pre_norm = FastLayerNorm(hidden_size, eps=1e-6)
         self.mlp_act = SiLUActivation()
 
     def __call__(self, x: mx.array, pe: mx.array, mod, safe_attn: bool = False):
@@ -226,18 +238,18 @@ class DoubleStreamBlock(nn.Module):
         head_dim = hidden_size // num_heads
         self.scale = head_dim ** -0.5
 
-        self.img_norm1 = nn.LayerNorm(hidden_size, eps=1e-6, affine=False)
+        self.img_norm1 = FastLayerNorm(hidden_size, eps=1e-6)
         self.img_attn = SelfAttention(hidden_size, num_heads=num_heads)
-        self.img_norm2 = nn.LayerNorm(hidden_size, eps=1e-6, affine=False)
+        self.img_norm2 = FastLayerNorm(hidden_size, eps=1e-6)
         self.img_mlp = [
             nn.Linear(hidden_size, mlp_hidden_dim * self.mlp_mult_factor, bias=False),
             SiLUActivation(),
             nn.Linear(mlp_hidden_dim, hidden_size, bias=False),
         ]
 
-        self.txt_norm1 = nn.LayerNorm(hidden_size, eps=1e-6, affine=False)
+        self.txt_norm1 = FastLayerNorm(hidden_size, eps=1e-6)
         self.txt_attn = SelfAttention(hidden_size, num_heads=num_heads)
-        self.txt_norm2 = nn.LayerNorm(hidden_size, eps=1e-6, affine=False)
+        self.txt_norm2 = FastLayerNorm(hidden_size, eps=1e-6)
         self.txt_mlp = [
             nn.Linear(hidden_size, mlp_hidden_dim * self.mlp_mult_factor, bias=False),
             SiLUActivation(),
@@ -298,7 +310,7 @@ class DoubleStreamBlock(nn.Module):
 class LastLayer(nn.Module):
     def __init__(self, hidden_size: int, out_channels: int):
         super().__init__()
-        self.norm_final = nn.LayerNorm(hidden_size, eps=1e-6, affine=False)
+        self.norm_final = FastLayerNorm(hidden_size, eps=1e-6)
         self.linear = nn.Linear(hidden_size, out_channels, bias=False)
         self.adaLN_modulation = [
             nn.SiLU(),
