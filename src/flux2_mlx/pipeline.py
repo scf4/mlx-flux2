@@ -176,25 +176,57 @@ class Flux2Pipeline:
 
         self._cached_empty_ctx = None
 
-    def _encode_text(self, prompts: list[str]) -> mx.array:
+    def _encode_text(self, prompts: list[str], verbose: bool = False) -> tuple[mx.array, dict[str, float]]:
         """Encode text prompts using (optionally compiled) text encoder."""
-        input_ids, attention_mask = self.text_encoder.tokenize(prompts)
-        return self._te_model_forward(input_ids, attention_mask)
+        import time
+        timings: dict[str, float] = {}
 
-    def encode_prompt(self, prompt: str, guidance_distilled: bool) -> tuple[mx.array, mx.array]:
+        t0 = time.perf_counter()
+        input_ids, attention_mask = self.text_encoder.tokenize(prompts)
+        if verbose:
+            mx.eval(input_ids, attention_mask)
+        timings["tokenize"] = time.perf_counter() - t0
+
+        t0 = time.perf_counter()
+        ctx = self._te_model_forward(input_ids, attention_mask)
+        if verbose:
+            mx.eval(ctx)
+        timings["model"] = time.perf_counter() - t0
+
+        return ctx, timings
+
+    def encode_prompt(
+        self, prompt: str, guidance_distilled: bool, verbose: bool = False
+    ) -> tuple[mx.array, mx.array, dict[str, float] | None]:
+        """Encode prompt to context tensors.
+
+        Returns (ctx, ctx_ids, timings) where timings is only populated if verbose=True.
+        """
+        import time
+        all_timings: dict[str, float] = {}
+
         if guidance_distilled:
-            ctx = self._encode_text([prompt])
+            ctx, timings = self._encode_text([prompt], verbose=verbose)
+            all_timings.update(timings)
         else:
             if self._cached_empty_ctx is None:
-                both = self._encode_text(["", prompt])
+                both, timings = self._encode_text(["", prompt], verbose=verbose)
+                all_timings.update(timings)
                 mx.eval(both)
                 self._cached_empty_ctx = both[:1]
                 ctx_prompt = both[1:]
             else:
-                ctx_prompt = self._encode_text([prompt])
+                ctx_prompt, timings = self._encode_text([prompt], verbose=verbose)
+                all_timings.update(timings)
             ctx = mx.concatenate([self._cached_empty_ctx, ctx_prompt], axis=0)
+
+        t0 = time.perf_counter()
         ctx, ctx_ids = batched_prc_txt(ctx)
-        return ctx, ctx_ids
+        if verbose:
+            mx.eval(ctx, ctx_ids)
+        all_timings["prc_txt"] = time.perf_counter() - t0
+
+        return ctx, ctx_ids, all_timings if verbose else None
 
     def generate(
         self,
@@ -224,13 +256,17 @@ class Flux2Pipeline:
         total_start = time.perf_counter()
 
         t0 = time.perf_counter()
-        ctx, ctx_ids = self.encode_prompt(prompt, guidance_distilled)
+        ctx, ctx_ids, te_breakdown = self.encode_prompt(prompt, guidance_distilled, verbose=verbose)
         if verbose:
             mx.eval(ctx, ctx_ids)
         timings["text_encode"] = time.perf_counter() - t0
 
         if verbose:
             print(f"[{timings['text_encode']*1000:7.1f}ms] Text encode: {ctx.shape[1]} tokens, shape {ctx.shape}")
+            if te_breakdown:
+                print(f"           ├─ tokenize: {te_breakdown['tokenize']*1000:.1f}ms")
+                print(f"           ├─ model:    {te_breakdown['model']*1000:.1f}ms")
+                print(f"           └─ prc_txt:  {te_breakdown['prc_txt']*1000:.1f}ms")
 
         img_cond_seq, img_cond_seq_ids = (None, None)
         if input_images:
