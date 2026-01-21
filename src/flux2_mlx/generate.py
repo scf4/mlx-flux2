@@ -18,29 +18,30 @@ from .image import load_images
 
 
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(description="FLUX.2 MLX inference")
+    p = argparse.ArgumentParser(description="FLUX.2 MLX inference", add_help=False)
+    p.add_argument("--help", action="help", help="Show this help message and exit")
     _add_generate_args(p)
     return p
 
 
 def _add_generate_args(parser: argparse.ArgumentParser) -> None:
     """Add generation arguments to a parser."""
-    parser.add_argument("--prompt", type=str, required=True, help="Text prompt")
-    parser.add_argument("--width", type=int, default=DEFAULT_WIDTH)
-    parser.add_argument("--height", type=int, default=DEFAULT_HEIGHT)
-    parser.add_argument("--steps", type=int, default=DEFAULT_STEPS)
+    parser.add_argument("-p", "--prompt", type=str, required=True, help="Text prompt")
+    parser.add_argument("-w", "--width", type=int, default=DEFAULT_WIDTH)
+    parser.add_argument("-h", "--height", type=int, default=DEFAULT_HEIGHT)
+    parser.add_argument("-t", "--steps", type=int, default=DEFAULT_STEPS)
     parser.add_argument("--guidance", type=float, default=DEFAULT_GUIDANCE)
-    parser.add_argument("--seed", type=int, default=None)
+    parser.add_argument("-s", "--seed", type=int, default=None)
     parser.add_argument("--output", type=Path, default=Path(DEFAULT_OUTPUT))
     parser.add_argument("--repo", type=Path, default=None, help="Local repo path")
     parser.add_argument("--repo-id", type=str, default=DEFAULT_REPO_ID)
     parser.add_argument("--input", type=Path, nargs="*", default=None, help="Optional reference images")
-    parser.add_argument("--quantize", type=str, choices=["none", "int8", "int4"], default=DEFAULT_QUANTIZE)
+    parser.add_argument("-q", "--quantize", type=str, choices=["none", "int8", "int4"], default=DEFAULT_QUANTIZE)
     parser.add_argument("--dtype", type=str, choices=["float16", "bfloat16"], default=DEFAULT_DTYPE)
     parser.add_argument("--vae-fp16", action="store_true", help="Run VAE in float16 (overrides force_upcast)")
     parser.add_argument("--safe-attn", action="store_true", help="Compute attention in fp32 for stability")
     parser.add_argument("--compile", action="store_true", help="Compile transformer forward with mx.compile")
-    parser.add_argument("--verbose", action="store_true", help="Enable progress logging")
+    parser.add_argument("-v", "--verbose", action="store_true", help="Enable progress logging")
     parser.add_argument("--eval-freq", type=int, default=1, help="Eval every N steps (higher = faster but more memory)")
 
 
