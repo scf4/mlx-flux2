@@ -33,6 +33,7 @@ from .tokenizer import Qwen3Tokenizer
 from .utils import (
     align_and_load,
     align_and_load_from_torch,
+    fuse_qkv_weights,
     list_safetensors,
     resolve_repo_path,
 )
@@ -143,6 +144,8 @@ class Flux2Pipeline:
         te_weights = {}
         for sp in shard_paths:
             te_weights.update(mx.load(str(sp)))
+        # Fuse separate Q/K/V weights into single QKV for efficiency
+        te_weights = fuse_qkv_weights(te_weights)
         align_and_load_from_torch(self.text_encoder.model, te_weights, strict=True)
 
         if self.quantize_mode in {"int8", "int4"}:

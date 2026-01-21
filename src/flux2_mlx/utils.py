@@ -72,3 +72,62 @@ def align_and_load_from_torch(module, weights: Dict[str, mx.array], strict: bool
 
 def list_safetensors(dir_path: Path) -> Tuple[Path, ...]:
     return tuple(sorted(dir_path.glob("*.safetensors")))
+
+
+def fuse_qkv_weights(weights: Dict[str, mx.array]) -> Dict[str, mx.array]:
+    """Fuse separate Q/K/V projection weights into single QKV weight.
+
+    Converts weights from format:
+        model.layers.N.self_attn.q_proj.weight
+        model.layers.N.self_attn.k_proj.weight
+        model.layers.N.self_attn.v_proj.weight
+    To:
+        model.layers.N.self_attn.qkv_proj.weight
+
+    This is a one-time transform at load time for fused QKV attention.
+    """
+    import re
+
+    # Find all layer indices that have q_proj weights
+    pattern = re.compile(r"model\.layers\.(\d+)\.self_attn\.q_proj\.weight")
+    layer_indices = set()
+    for key in weights:
+        match = pattern.match(key)
+        if match:
+            layer_indices.add(int(match.group(1)))
+
+    if not layer_indices:
+        return weights  # No q_proj found, return unchanged
+
+    # Create new dict with fused weights
+    out = {}
+    fused_prefixes = set()
+
+    for idx in layer_indices:
+        prefix = f"model.layers.{idx}.self_attn"
+        q_key = f"{prefix}.q_proj.weight"
+        k_key = f"{prefix}.k_proj.weight"
+        v_key = f"{prefix}.v_proj.weight"
+
+        if q_key in weights and k_key in weights and v_key in weights:
+            # Concatenate Q, K, V weights along output dimension (axis 0 for transposed)
+            # HuggingFace format: (out_features, in_features)
+            # MLX Linear expects: (out_features, in_features) after transpose
+            q_w = weights[q_key]
+            k_w = weights[k_key]
+            v_w = weights[v_key]
+            qkv_w = mx.concatenate([q_w, k_w, v_w], axis=0)
+            out[f"{prefix}.qkv_proj.weight"] = qkv_w
+            fused_prefixes.add(prefix)
+
+    # Copy all other weights, skipping the individual q/k/v that were fused
+    for key, value in weights.items():
+        skip = False
+        for prefix in fused_prefixes:
+            if key in (f"{prefix}.q_proj.weight", f"{prefix}.k_proj.weight", f"{prefix}.v_proj.weight"):
+                skip = True
+                break
+        if not skip:
+            out[key] = value
+
+    return out
