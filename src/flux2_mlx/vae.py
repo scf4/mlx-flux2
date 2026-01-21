@@ -10,21 +10,20 @@ from .config import VAEConfig
 
 
 def swish(x: mx.array) -> mx.array:
-    return x * nn.sigmoid(x)
+    return nn.silu(x)
 
 
 class ResnetBlock(nn.Module):
     def __init__(self, in_channels: int, out_channels: int | None, norm_groups: int):
         super().__init__()
         out_channels = in_channels if out_channels is None else out_channels
-        self.in_channels = in_channels
-        self.out_channels = out_channels
+        self.use_shortcut = in_channels != out_channels
 
         self.norm1 = nn.GroupNorm(norm_groups, in_channels, eps=1e-6, affine=True, pytorch_compatible=True)
         self.conv1 = nn.Conv2d(in_channels, out_channels, kernel_size=3, stride=1, padding=1)
         self.norm2 = nn.GroupNorm(norm_groups, out_channels, eps=1e-6, affine=True, pytorch_compatible=True)
         self.conv2 = nn.Conv2d(out_channels, out_channels, kernel_size=3, stride=1, padding=1)
-        if self.in_channels != self.out_channels:
+        if self.use_shortcut:
             self.nin_shortcut = nn.Conv2d(in_channels, out_channels, kernel_size=1, stride=1, padding=0)
 
     def __call__(self, x: mx.array) -> mx.array:
@@ -34,7 +33,7 @@ class ResnetBlock(nn.Module):
         h = self.norm2(h)
         h = swish(h)
         h = self.conv2(h)
-        if self.in_channels != self.out_channels:
+        if self.use_shortcut:
             x = self.nin_shortcut(x)
         return x + h
 
@@ -115,7 +114,6 @@ class Encoder(nn.Module):
         curr_res = resolution
         for i_level in range(self.num_resolutions):
             block = []
-            attn = []
             block_in = ch * in_ch_mult[i_level]
             block_out = ch * ch_mult[i_level]
             for _ in range(self.num_res_blocks):
@@ -123,7 +121,6 @@ class Encoder(nn.Module):
                 block_in = block_out
             down = nn.Module()
             down.block = block
-            down.attn = attn
             if i_level != self.num_resolutions - 1:
                 down.downsample = Downsample(block_in)
                 curr_res = curr_res // 2
@@ -142,8 +139,6 @@ class Encoder(nn.Module):
         for i_level in range(self.num_resolutions):
             for i_block in range(self.num_res_blocks):
                 h = self.down[i_level].block[i_block](h)
-                if len(self.down[i_level].attn) > 0:
-                    h = self.down[i_level].attn[i_block](h)
             if i_level != self.num_resolutions - 1:
                 h = self.down[i_level].downsample(h)
 
@@ -179,8 +174,6 @@ class Decoder(nn.Module):
         self.ffactor = 2 ** (self.num_resolutions - 1)
 
         block_in = ch * ch_mult[self.num_resolutions - 1]
-        curr_res = resolution // 2 ** (self.num_resolutions - 1)
-        self.z_shape = (1, z_channels, curr_res, curr_res)
 
         self.conv_in = nn.Conv2d(z_channels, block_in, kernel_size=3, stride=1, padding=1)
 
@@ -192,18 +185,17 @@ class Decoder(nn.Module):
         self.up = []
         for i_level in reversed(range(self.num_resolutions)):
             block = []
-            attn = []
             block_out = ch * ch_mult[i_level]
             for _ in range(self.num_res_blocks + 1):
                 block.append(ResnetBlock(block_in, block_out, norm_groups))
                 block_in = block_out
             up = nn.Module()
             up.block = block
-            up.attn = attn
             if i_level != 0:
                 up.upsample = Upsample(block_in)
-                curr_res = curr_res * 2
-            self.up.insert(0, up)
+            self.up.append(up)
+        # Reverse to match weight indexing: up[0]=finest, up[n-1]=coarsest
+        self.up = self.up[::-1]
 
         self.norm_out = nn.GroupNorm(norm_groups, block_in, eps=1e-6, affine=True, pytorch_compatible=True)
         self.conv_out = nn.Conv2d(block_in, out_ch, kernel_size=3, stride=1, padding=1)
@@ -218,8 +210,6 @@ class Decoder(nn.Module):
         for i_level in reversed(range(self.num_resolutions)):
             for i_block in range(self.num_res_blocks + 1):
                 h = self.up[i_level].block[i_block](h)
-                if len(self.up[i_level].attn) > 0:
-                    h = self.up[i_level].attn[i_block](h)
             if i_level != 0:
                 h = self.up[i_level].upsample(h)
 
@@ -263,15 +253,14 @@ class AutoEncoder(nn.Module):
             affine=False,
             track_running_stats=True,
         )
+        self.bn.train(mode=False)  # VAE is inference-only
         self._inv_norm_scale: mx.array | None = None
         self._inv_norm_mean: mx.array | None = None
 
     def normalize(self, z: mx.array) -> mx.array:
-        self.bn.eval()
         return self.bn(z)
 
     def inv_normalize(self, z: mx.array) -> mx.array:
-        self.bn.eval()
         if self._inv_norm_scale is None:
             self._inv_norm_scale = mx.sqrt(self.bn.running_var.reshape(1, 1, 1, -1) + self.bn_eps)
             self._inv_norm_mean = self.bn.running_mean.reshape(1, 1, 1, -1)
@@ -282,7 +271,7 @@ class AutoEncoder(nn.Module):
         if self.force_upcast and x.dtype != mx.float32:
             x = x.astype(mx.float32)
         moments = self.encoder(x)
-        mean = mx.split(moments, 2, axis=-1)[0]
+        mean = moments[..., :self.params.z_channels]
         b, h, w, c = mean.shape
         pi, pj = self.ps
         mean = mean.reshape(b, h // pi, pi, w // pj, pj, c)
